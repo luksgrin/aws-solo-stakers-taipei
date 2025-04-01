@@ -1,0 +1,514 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: CloudFormation template for Ethereum staking practice on AWS EC2 with EC2 Instance Connect, port monitoring, and SNS notifications
+
+Parameters:
+  NotificationEmail:
+    Type: String
+    Description: Email address to receive SNS notifications
+    Default: your-email@example.com
+  SSHInboundCIDR:
+    Type: String
+    Description: To allow inbound traffic from somewhere. Please replace the default 0.0.0.0/0 with EC2_INSTANCE_CONNECT public IP in https://ip-ranges.amazonaws.com/ip-ranges.json
+    Default: 0.0.0.0/0
+
+Resources:
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: EthStakingVPC
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: EthStakingIGW
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.1.0/24
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: EthStakingPublicSubnet
+
+  RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: EthStakingRouteTable
+
+  Route:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref RouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  SubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref RouteTable
+
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for Ethereum staking EC2 instance
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Sub "${SSHInboundCIDR}"
+        - IpProtocol: tcp
+          FromPort: 3000
+          ToPort: 3000
+          CidrIp: !Sub "0.0.0.0/0"
+        - IpProtocol: tcp
+          FromPort: 30303
+          ToPort: 30303
+          CidrIp: !Sub "0.0.0.0/0"
+        - IpProtocol: udp
+          FromPort: 30303
+          ToPort: 30303
+          CidrIp: !Sub "0.0.0.0/0"
+        - IpProtocol: tcp
+          FromPort: 9000
+          ToPort: 9000
+          CidrIp: !Sub "0.0.0.0/0"
+        - IpProtocol: udp
+          FromPort: 9000
+          ToPort: 9000
+          CidrIp: !Sub "0.0.0.0/0"
+        - IpProtocol: tcp
+          FromPort: 51680
+          ToPort: 51680
+          CidrIp: !Sub "0.0.0.0/0"
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !Sub "0.0.0.0/0"
+        - IpProtocol: tcp
+          FromPort: 3610
+          ToPort: 3610
+          CidrIp: !Sub "0.0.0.0/0"
+        - IpProtocol: tcp
+          FromPort: 12001
+          ToPort: 12001
+          CidrIp: !Sub "0.0.0.0/0"
+        - IpProtocol: tcp
+          FromPort: 13001
+          ToPort: 13001
+          CidrIp: !Sub "0.0.0.0/0"
+      Tags:
+        - Key: Name
+          Value: EthStakingSecurityGroup
+
+  
+  EC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns: 
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+      Policies:
+        - PolicyName: EC2InstanceConnectAndCloudWatch
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2-instance-connect:SendSSHPublicKey
+                  - ec2:DescribeVolumes
+                  - ec2:DescribeTags
+                  - cloudwatch:PutMetricData
+                  - cloudwatch:GetMetricStatistics
+                  - cloudwatch:ListMetrics
+                  - logs:DescribeLogStreams
+                  - logs:DescribeLogGroups
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: '*'
+
+  
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref EC2Role
+
+  # SNS Topic for notifications
+  SNSTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: PortMonitoringNotifications
+      Subscription:
+        - Endpoint: !Ref NotificationEmail
+          Protocol: email
+
+  # If you would like to switch the type of EC2 instance, please refer to https://instances.vantage.sh/     
+  EthStakingInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: c5.xlarge
+      ImageId: ami-04b4f1a9cf54c11d0  # Ubuntu 24.04 LTS in us-east-1 (update for your region)
+      IamInstanceProfile: !Ref InstanceProfile
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeSize: 300
+            VolumeType: gp3
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: true
+          DeviceIndex: '0'
+          SubnetId: !Ref PublicSubnet
+          GroupSet:
+            - !Ref SecurityGroup
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          # Update system
+          apt-get update -y && apt-get upgrade -y
+
+          # Install EC2 Instance Connect
+          apt install ec2-instance-connect -y
+
+          # Install AWS CLI
+          apt install unzip -y
+          curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+          unzip awscliv2.zip
+          ./aws/install
+
+          # Install Docker
+          curl -fsSL https://get.docker.com -o get-docker.sh
+          sh get-docker.sh
+          usermod -aG docker ubuntu
+
+          # Install Git and netcat
+          apt install git netcat -y
+
+          # Install CloudWatch Agent
+          wget https://s3.amazonaws.com/amazoncloudwatch-agent/ubuntu/amd64/latest/amazon-cloudwatch-agent.deb
+          dpkg -i amazon-cloudwatch-agent.deb
+          rm amazon-cloudwatch-agent.deb
+
+          # Get Instance ID
+          TOKEN=$(curl -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
+
+          INSTANCE_ID=$(curl -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
+
+          # Configure CloudWatch Agent for memory monitoring
+          cat <<EOF > /opt/aws/amazon-cloudwatch-agent/bin/config.json
+          {
+            "agent": {
+                "metrics_collection_interval": 60,
+                "run_as_user": "cwagent"
+            },
+            "metrics": {
+                "namespace": "CWAgent",
+                "metrics_collected": {
+                    "mem": {
+                        "measurement": [
+                            "mem_used_percent",
+                            "mem_total",
+                            "mem_used"
+                        ],
+                        "metrics_collection_interval": 60
+                    },
+                    "disk": {
+                        "measurement": [
+                            "disk_used_percent",
+                            "disk_total",
+                            "disk_used"
+                        ],
+                        "metrics_collection_interval": 60,
+                        "resources": [
+                            "/"
+                        ]
+                    }
+                },
+                "append_dimensions": {
+                  "InstanceId": "$INSTANCE_ID"
+              }    
+            }
+          }
+
+          EOF
+          /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -c file:/opt/aws/amazon-cloudwatch-agent/bin/config.json -s
+
+          # Install and configure UFW (Firewall)
+          apt install ufw -y
+          ufw allow 22/tcp    # SSH
+          ufw allow 443/tcp   # HTTPS
+          ufw allow 3610/tcp  # P2P
+          ufw allow 12001/tcp # RPC
+          ufw allow 13001/tcp # RPC
+          ufw allow 30303     # Ethereum execution client (TCP/UDP)
+          ufw allow 9000      # Ethereum consensus client (TCP/UDP)
+          ufw allow 3000/tcp  # Grafana
+          ufw allow 51680/tcp # CL Node
+          ufw default deny incoming
+          ufw default allow outgoing
+          echo "y" | ufw enable
+
+          # Enable automatic security updates
+          apt install unattended-upgrades -y
+          dpkg-reconfigure --priority=low unattended-upgrades <<< $'yes\n'
+
+          # Clone and setup ETH Docker
+          # For a quick testnet start, you can install prerequisites and configure Eth Docker, as any user not named root
+          git clone https://github.com/eth-educators/eth-docker.git /home/ubuntu/eth-docker
+          chown -R ubuntu:ubuntu /home/ubuntu/eth-docker
+          cd /home/ubuntu/eth-docker
+          sudo -u ubuntu ./ethd install
+          sudo -u ubuntu bash -c 'echo "NETWORK=holesky" >> .env'
+          sudo -u ubuntu bash -c 'echo "CL_NODE=https://checkpoint-sync.holesky.ethpandaops.io" >> .env'
+          sudo -u ubuntu bash -c 'echo "GRAFFITI=AWS-Staker" >> .env'
+          sudo -u ubuntu bash -c 'echo "MEV_BOOST=true" >> .env'
+          
+
+          # Install port monitoring script with dynamic Instance ID
+          cat <<EOF > /home/ubuntu/monitor_ports.sh
+          #!/bin/bash
+          PORTS="22 443 30303 9000 3000 3610 12001 13001"
+          for PORT in \$PORTS; do
+            nc -z -w 5 127.0.0.1 \$PORT
+            STATUS=\$?
+            aws cloudwatch put-metric-data --namespace "CWAgent" --metric-name "PortStatus_\$PORT" --value \$([ \$STATUS -eq 0 ] && echo 1 || echo 0) --unit None --dimensions InstanceId="$INSTANCE_ID"
+          done
+          EOF
+          chmod +x /home/ubuntu/monitor_ports.sh
+          echo "* * * * * root /home/ubuntu/monitor_ports.sh" >> /etc/crontab
+
+          # Reboot OS
+          reboot
+
+      Tags:
+        - Key: Name
+          Value: EthStakingNode
+
+    # CloudWatch Alarms for each port
+  Port22Alarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: Port22Unreachable
+      AlarmDescription: Alarm when port 22 is unreachable
+      Namespace: CWAgent
+      MetricName: PortStatus_22
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref EthStakingInstance
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 2
+      Threshold: 0
+      ComparisonOperator: LessThanOrEqualToThreshold
+      AlarmActions:
+        - !Ref SNSTopic
+  
+  Port443Alarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: Port443Unreachable
+      AlarmDescription: Alarm when port 443 is unreachable
+      Namespace: CWAgent
+      MetricName: PortStatus_443
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref EthStakingInstance
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 2
+      Threshold: 0
+      ComparisonOperator: LessThanOrEqualToThreshold
+      AlarmActions:
+        - !Ref SNSTopic
+
+  Port3610Alarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: Port3610Unreachable
+      AlarmDescription: Alarm when port 3610 is unreachable
+      Namespace: CWAgent
+      MetricName: PortStatus_3610
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref EthStakingInstance
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 2
+      Threshold: 0
+      ComparisonOperator: LessThanOrEqualToThreshold
+      AlarmActions:
+        - !Ref SNSTopic
+
+  Port12001Alarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: Port12001Unreachable
+      AlarmDescription: Alarm when port 12001 is unreachable
+      Namespace: CWAgent
+      MetricName: PortStatus_12001
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref EthStakingInstance
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 2
+      Threshold: 0
+      ComparisonOperator: LessThanOrEqualToThreshold
+      AlarmActions:
+        - !Ref SNSTopic
+
+  Port13001Alarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: Port13001Unreachable
+      AlarmDescription: Alarm when port 13001 is unreachable
+      Namespace: CWAgent
+      MetricName: PortStatus_13001
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref EthStakingInstance
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 2
+      Threshold: 0
+      ComparisonOperator: LessThanOrEqualToThreshold
+      AlarmActions:
+        - !Ref SNSTopic
+
+  Port30303Alarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: Port30303Unreachable
+      AlarmDescription: Alarm when port 30303 is unreachable
+      Namespace: CWAgent
+      MetricName: PortStatus_30303
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref EthStakingInstance
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 2
+      Threshold: 0
+      ComparisonOperator: LessThanOrEqualToThreshold
+      AlarmActions:
+        - !Ref SNSTopic
+
+  Port9000Alarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: Port9000Unreachable
+      AlarmDescription: Alarm when port 9000 is unreachable
+      Namespace: CWAgent
+      MetricName: PortStatus_9000
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref EthStakingInstance
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 2
+      Threshold: 0
+      ComparisonOperator: LessThanOrEqualToThreshold
+      AlarmActions:
+        - !Ref SNSTopic
+
+  Port3000Alarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: Port3000Unreachable
+      AlarmDescription: Alarm when port 3000 is unreachable
+      Namespace: CWAgent
+      MetricName: PortStatus_3000
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref EthStakingInstance
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 2
+      Threshold: 0
+      ComparisonOperator: LessThanOrEqualToThreshold
+      AlarmActions:
+        - !Ref SNSTopic
+
+  # CloudWatch Alarm for Memory Usage
+  MemoryUsageAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: HighMemoryUsage
+      AlarmDescription: Alarm when memory usage exceeds 80%
+      Namespace: CWAgent
+      MetricName: mem_used_percent
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref EthStakingInstance
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 2
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+      AlarmActions:
+        - !Ref SNSTopic
+  
+  # CloudWatch Alarm for Disk Usage
+  DiskUsageAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: HighDiskUsage
+      AlarmDescription: Alarm when disk usage exceeds 80%
+      Namespace: CWAgent
+      MetricName: disk_used_percent
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref EthStakingInstance
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 2
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+      AlarmActions:
+        - !Ref SNSTopic
+
+  ElasticIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      InstanceId: !Ref EthStakingInstance
+
+Outputs:
+  InstancePublicIP:
+    Description: Public IP of the staking instance
+    Value: !GetAtt EthStakingInstance.PublicIp
+  ElasticIP:
+    Description: Static Elastic IP (if assigned)
+    Value: !Ref ElasticIP
+  SNSTopicArn:
+    Description: ARN of the SNS topic for notifications
+    Value: !Ref SNSTopic
